@@ -1,0 +1,176 @@
+
+Unity ML Agents
+Proximal Policy Optimization (PPO)
+Contains an implementation of PPO as described here.
+In [1]:
+import numpy as np
+import os
+import tensorflow as tf
+​
+from ppo.history import *
+from ppo.models import *
+from ppo.trainer import Trainer
+from unityagents import *
+C:\Users\CAT\Anaconda3\lib\site-packages\h5py\__init__.py:36: FutureWarning: Conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated. In future, it will be treated as `np.float64 == np.dtype(float).type`.
+  from ._conv import register_converters as _register_converters
+
+
+Hyperparameters
+In [2]:
+### General parameters
+max_steps = 5e5 # Set maximum number of steps to run environment.
+run_path = "ppo" # The sub-directory name for model and summary statistics
+load_model = False # Whether to load a saved model.
+train_model = True # Whether to train the model.
+summary_freq = 10000 # Frequency at which to save training statistics.
+save_freq = 50000 # Frequency at which to save model.
+env_name = "ball" # Name of the training environment file.
+curriculum_file = None
+​
+### Algorithm-specific parameters for tuning
+gamma = 0.99 # Reward discount rate.
+lambd = 0.95 # Lambda parameter for GAE.
+time_horizon = 2048 # How many steps to collect per agent before adding to buffer.
+beta = 1e-3 # Strength of entropy regularization
+num_epoch = 5 # Number of gradient descent steps per batch of experiences.
+num_layers = 2 # Number of hidden layers between state/observation encoding and value/policy layers.
+epsilon = 0.2 # Acceptable threshold around ratio of old and new policy probabilities.
+buffer_size = 2048 # How large the experience buffer should be before gradient descent.
+learning_rate = 3e-4 # Model learning rate.
+hidden_units = 64 # Number of units in hidden layer.
+batch_size = 64 # How many experiences per gradient descent update step.
+normalize = False
+​
+### Logging dictionary for hyperparameters
+hyperparameter_dict = {'max_steps':max_steps, 'run_path':run_path, 'env_name':env_name,
+   'curriculum_file':curriculum_file, 'gamma':gamma, 'lambd':lambd, 'time_horizon':time_horizon,
+   'beta':beta, 'num_epoch':num_epoch, 'epsilon':epsilon, 'buffe_size':buffer_size,
+   'learning_rate':learning_rate, 'hidden_units':hidden_units, 'batch_size':batch_size}
+Load the environment
+In [3]:
+env = UnityEnvironment(file_name=env_name, curriculum=curriculum_file)
+print(str(env))
+brain_name = env.external_brain_names[0]
+INFO:unityagents:
+'Ball3DAcademy' started successfully!
+
+
+Unity Academy name: Ball3DAcademy
+        Number of brains: 1
+        Reset Parameters :
+		
+Unity brain name: Ball3DBrain
+        Number of observations (per agent): 0
+        State space type: continuous
+        State space size (per agent): 8
+        Action space type: continuous
+        Action space size (per agent): 2
+        Memory space size (per agent): 0
+        Action descriptions: , 
+
+
+Train the Agent(s)
+In [ ]:
+tf.reset_default_graph()
+​
+if curriculum_file == "None":
+   curriculum_file = None
+​
+​
+def get_progress():
+   if curriculum_file is not None:
+       if env._curriculum.measure_type == "progress":
+           return steps / max_steps
+       elif env._curriculum.measure_type == "reward":
+           return last_reward
+       else:
+           return None
+   else:
+       return None
+​
+# Create the Tensorflow model graph
+ppo_model = create_agent_model(env, lr=learning_rate,
+                              h_size=hidden_units, epsilon=epsilon,
+                              beta=beta, max_step=max_steps,
+                              normalize=normalize, num_layers=num_layers)
+​
+is_continuous = (env.brains[brain_name].action_space_type == "continuous")
+use_observations = (env.brains[brain_name].number_observations > 0)
+use_states = (env.brains[brain_name].state_space_size > 0)
+​
+model_path = './models/{}'.format(run_path)
+summary_path = './summaries/{}'.format(run_path)
+​
+if not os.path.exists(model_path):
+   os.makedirs(model_path)
+​
+if not os.path.exists(summary_path):
+   os.makedirs(summary_path)
+​
+init = tf.global_variables_initializer()
+saver = tf.train.Saver()
+​
+with tf.Session() as sess:
+   # Instantiate model parameters
+   if load_model:
+       print('Loading Model...')
+       ckpt = tf.train.get_checkpoint_state(model_path)
+       saver.restore(sess, ckpt.model_checkpoint_path)
+   else:
+       sess.run(init)
+   steps, last_reward = sess.run([ppo_model.global_step, ppo_model.last_reward])   
+   summary_writer = tf.summary.FileWriter(summary_path)
+   info = env.reset(train_mode=train_model, progress=get_progress())[brain_name]
+   trainer = Trainer(ppo_model, sess, info, is_continuous, use_observations, use_states, train_model)
+   if train_model:
+       trainer.write_text(summary_writer, 'Hyperparameters', hyperparameter_dict, steps)
+   while steps <= max_steps:
+       if env.global_done:
+           info = env.reset(train_mode=train_model, progress=get_progress())[brain_name]
+       # Decide and take an action
+       new_info = trainer.take_action(info, env, brain_name, steps, normalize)
+       info = new_info
+       trainer.process_experiences(info, time_horizon, gamma, lambd)
+       if len(trainer.training_buffer['actions']) > buffer_size and train_model:
+           # Perform gradient descent with experience buffer
+           trainer.update_model(batch_size, num_epoch)
+       if steps % summary_freq == 0 and steps != 0 and train_model:
+           # Write training statistics to tensorboard.
+           trainer.write_summary(summary_writer, steps, env._curriculum.lesson_number)
+       if steps % save_freq == 0 and steps != 0 and train_model:
+           # Save Tensorflow model
+           save_model(sess, model_path=model_path, steps=steps, saver=saver)
+       steps += 1
+       sess.run(ppo_model.increment_step)
+       if len(trainer.stats['cumulative_reward']) > 0:
+           mean_reward = np.mean(trainer.stats['cumulative_reward'])
+           sess.run(ppo_model.update_reward, feed_dict={ppo_model.new_reward: mean_reward})
+           last_reward = sess.run(ppo_model.last_reward)
+   # Final save Tensorflow model
+   if steps != 0 and train_model:
+       save_model(sess, model_path=model_path, steps=steps, saver=saver)
+env.close()
+export_graph(model_path, env_name)
+Export the trained Tensorflow graph
+Once the model has been trained and saved, we can export it as a .bytes file which Unity can embed.
+In [5]:
+export_graph(model_path, env_name)
+INFO:tensorflow:Restoring parameters from ./models/ppo\model-100000.cptk
+
+
+INFO:tensorflow:Restoring parameters from ./models/ppo\model-100000.cptk
+
+
+INFO:tensorflow:Froze 7 variables.
+
+
+INFO:tensorflow:Froze 7 variables.
+
+
+Converted 7 variables to const ops.
+
+
+In [ ]:
+​
+
+
